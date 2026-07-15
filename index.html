@@ -58,7 +58,7 @@
 
   <script>
     (()=>{'use strict';
-      const API=`${location.protocol}//${location.hostname}:5000/api`;
+      const API='/api';
       const $=id=>document.getElementById(id),escapeHTML=value=>String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
       const state={token:null,user:null,matches:[],pendingEmail:'',otpTimer:null,rejectUser:null};
       const endpoints={signup:'/auth/signup',verifyOtp:'/auth/verify-otp',resendOtp:'/auth/resend-otp',login:'/auth/login',forgot:'/auth/forgot-password',reset:'/auth/reset-password',pending:'/admin/pending-users',approve:'/admin/approve-user',reject:'/admin/reject-user',createTournament:'/admin/create-tournament',createMatch:'/admin/create-match',result:'/admin/update-match-result',predict:'/predict-match',matches:'/matches',stats:'/predictions/stats',leaderboard:'/leaderboard'};

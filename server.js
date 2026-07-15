@@ -31,6 +31,7 @@ app.use(cors({
 
 app.use(express.json());
 app.get('/', (req, res) => res.sendFile('index.html', { root: __dirname }));
+app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
