@@ -127,33 +127,149 @@ app.post('/api/auth/login', async (req, res, next) => {
 // --- Prediction API ---
 app.post('/api/predict', authenticateToken, async (req, res, next) => {
     const { match_id, predicted_winner, bet_amount, predicted_score } = req.body;
-    if (!match_id || !predicted_winner || !bet_amount || !predicted_score) {
+    const matchId = Number(match_id);
+    const stake = Number(bet_amount);
+    if (!Number.isInteger(matchId) || matchId < 1 || !predicted_winner || !predicted_score) {
         return res.status(400).json({ message: "Incomplete prediction details" });
+    }
+    if (!Number.isInteger(stake) || stake <= 0) {
+        return res.status(400).json({ message: "Bet amount must be a positive whole number." });
     }
 
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         const userRes = await client.query('SELECT balance FROM users WHERE id = $1 FOR UPDATE', [req.user.id]);
-        const currentBalance = userRes.rows[0].balance;
+        if (!userRes.rowCount) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: "User not found." });
+        }
+        const currentBalance = Number(userRes.rows[0].balance);
 
-        if (currentBalance < bet_amount) {
+        if (currentBalance < stake) {
             await client.query('ROLLBACK');
             return res.status(400).json({ message: "Insufficient balance!" });
         }
 
         const updatedUser = await client.query(
             'UPDATE users SET balance = balance - $1 WHERE id = $2 RETURNING balance',
-            [bet_amount, req.user.id]
+            [stake, req.user.id]
         );
 
         await client.query(
             'INSERT INTO predictions (user_id, match_id, predicted_winner, bet_amount, predicted_score) VALUES ($1, $2, $3, $4, $5)',
-            [req.user.id, match_id, predicted_winner, bet_amount, predicted_score]
+            [req.user.id, matchId, String(predicted_winner).trim(), stake, String(predicted_score).trim()]
         );
 
         await client.query('COMMIT');
         res.json({ message: "Prediction submitted!", newBalance: updatedUser.rows[0].balance });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        next(err);
+    } finally {
+        client.release();
+    }
+});
+
+// --- Admin Match Settlement ---
+app.post('/api/admin/settle-match', authenticateToken, async (req, res, next) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ message: "Admin access only!" });
+    }
+
+    const matchId = Number(req.body.match_id);
+    const actualWinner = String(req.body.actual_winner || req.body.official_winner || '').trim();
+    const actualScore = String(req.body.actual_score || '').trim();
+    if (!Number.isInteger(matchId) || matchId < 1 || !actualWinner || !actualScore) {
+        return res.status(400).json({ message: "Match, winner, and actual score are required." });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const matchResult = await client.query(
+            'SELECT id, team_a, team_b, status FROM matches WHERE id = $1 FOR UPDATE',
+            [matchId]
+        );
+        if (!matchResult.rowCount) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: "Match not found." });
+        }
+
+        const match = matchResult.rows[0];
+        if (match.status === 'finished') {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ message: "This match has already been settled." });
+        }
+        if (![match.team_a, match.team_b].includes(actualWinner)) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ message: "Winner must be one of the match teams." });
+        }
+
+        const predictionResult = await client.query(
+            'SELECT id, user_id, predicted_winner, bet_amount FROM predictions WHERE match_id = $1 FOR UPDATE',
+            [matchId]
+        );
+        const predictions = predictionResult.rows;
+        const winners = predictions.filter((prediction) => prediction.predicted_winner === actualWinner);
+        const winningPool = winners.reduce((sum, prediction) => sum + Number(prediction.bet_amount), 0);
+        const losingPool = predictions
+            .filter((prediction) => prediction.predicted_winner !== actualWinner)
+            .reduce((sum, prediction) => sum + Number(prediction.bet_amount), 0);
+
+        const profitByPrediction = new Map();
+        if (winningPool > 0 && losingPool > 0) {
+            const shares = winners.map((prediction) => {
+                const exactProfit = Number(prediction.bet_amount) / winningPool * losingPool;
+                return {
+                    prediction,
+                    profit: Math.floor(exactProfit),
+                    remainder: exactProfit - Math.floor(exactProfit)
+                };
+            });
+            let undistributed = losingPool - shares.reduce((sum, share) => sum + share.profit, 0);
+            shares.sort((a, b) => b.remainder - a.remainder || Number(a.prediction.id) - Number(b.prediction.id));
+            for (let index = 0; index < undistributed; index += 1) {
+                shares[index % shares.length].profit += 1;
+            }
+            shares.forEach((share) => profitByPrediction.set(share.prediction.id, share.profit));
+        }
+
+        for (const prediction of predictions) {
+            const won = prediction.predicted_winner === actualWinner;
+            // Stakes were deducted when predictions were placed. Winners receive
+            // their stake back plus profit. If nobody won, every stake is refunded.
+            const payout = winningPool === 0
+                ? Number(prediction.bet_amount)
+                : won
+                    ? Number(prediction.bet_amount) + (profitByPrediction.get(prediction.id) || 0)
+                    : 0;
+            if (payout > 0) {
+                await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [payout, prediction.user_id]);
+            }
+            await client.query(
+                'UPDATE predictions SET status = $1 WHERE id = $2',
+                [won ? 'won' : 'lost', prediction.id]
+            );
+        }
+
+        await client.query(
+            `UPDATE matches SET status = 'finished', actual_winner = $1, actual_score = $2 WHERE id = $3`,
+            [actualWinner, actualScore, matchId]
+        );
+        await client.query('COMMIT');
+
+        res.json({
+            message: "Match settled and payouts distributed.",
+            settlement: {
+                predictions: predictions.length,
+                winners: winners.length,
+                winning_pool: winningPool,
+                losing_pool: losingPool,
+                refunded: winningPool === 0
+            }
+        });
     } catch (err) {
         await client.query('ROLLBACK');
         next(err);
