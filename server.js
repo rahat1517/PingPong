@@ -32,6 +32,12 @@ app.use(cors({
 
 app.use(express.json());
 
+// Railway health check endpoint. This intentionally does not depend on the
+// database so Railway can verify that the HTTP process is running.
+app.get('/api/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
+});
+
 // --- JWT Secret ---
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
