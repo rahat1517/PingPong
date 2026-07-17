@@ -12,16 +12,24 @@ if (process.env.NODE_ENV !== 'production') {
 const app = express();
 
 // --- CORS Config ---
-const allowedOrigins = [
-    process.env.FRONTEND_URL,   // তোমার লাইভ ফ্রন্টএন্ড ডোমেইন
-    'http://localhost:3000',    // লোকাল ডেভেলপমেন্ট
-    'http://127.0.0.1:5500'     // Live Server
-];
+const productionOrigin = String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
+const isProduction = process.env.NODE_ENV === 'production';
+const isLocalDevelopmentOrigin = (origin) => {
+    try {
+        const url = new URL(origin);
+        return url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname);
+    } catch {
+        return false;
+    }
+};
 
 app.use(cors({
     origin: function (origin, callback) {
         if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) === -1) {
+        const normalizedOrigin = origin.replace(/\/$/, '');
+        const allowed = normalizedOrigin === productionOrigin
+            || (!isProduction && isLocalDevelopmentOrigin(normalizedOrigin));
+        if (!allowed) {
             const msg = 'CORS policy does not allow this origin.';
             return callback(new Error(msg), false);
         }
@@ -35,6 +43,7 @@ app.use(express.json());
 // Railway health check endpoint. This intentionally does not depend on the
 // database so Railway can verify that the HTTP process is running.
 app.get('/api/health', (req, res) => {
+    console.log('Server healthy');
     res.status(200).json({ status: 'ok' });
 });
 
